@@ -8,7 +8,8 @@ Les modèles sont lus dans ml/models/ :
 Chargement à la demande puis mise en cache. CPU par défaut ; AURA_DEVICE=cuda pour le GPU.
 
 Chaque modèle renvoie : catégorie, probabilité, probabilités des 4 classes et un score d'aura (-100..100).
-Pour CamemBERT (score continu), les « probabilités » sont une distribution douce autour du score prédit ;
+Pour CamemBERT (score continu), les « probabilités » sont une distribution douce construite à partir des seuils
+(distance du score à l'intervalle de chaque classe) : la classe affichée a toujours la barre la plus haute ;
 pour le SVM et le CNN, le score est l'espérance Σ p_k · centre_k.
 """
 import hashlib
@@ -34,7 +35,22 @@ DTYPE = os.environ.get("AURA_DTYPE", "float32")
 
 
 def proba_depuis_score(s, temperature=18.0):
+    """Distribution douce autour des CENTRES des classes (modèle démo, où la classe est l'argmax)."""
     z = -np.abs(s - CENTRES) / temperature
+    p = np.exp(z - z.max())
+    return p / p.sum()
+
+
+def proba_depuis_seuils(s, seuils, temperature=18.0):
+    """Distribution douce cohérente avec les SEUILS qui décident la classe (np.digitize) : chaque classe est
+    pénalisée par la distance du score à SON intervalle [seuil bas, seuil haut[. La classe qui contient le score
+    est à distance 0, elle a donc toujours la plus forte probabilité (contrairement à la distance aux centres :
+    avec les seuils [-12, 36, 69], un score de -22 est Anti-Aura mais plus proche du centre de « Correcte »)."""
+    bornes = np.concatenate([[-np.inf], np.asarray(seuils, dtype=float), [np.inf]])
+    bas, haut = bornes[:-1], bornes[1:]
+    # intervalle semi-ouvert comme np.digitize : un score pile sur un seuil appartient à la classe du dessus
+    dist = np.where(s < bas, bas - s, np.where(s >= haut, s - haut + 1e-6, 0.0))
+    z = -dist / temperature
     p = np.exp(z - z.max())
     return p / p.sum()
 
@@ -60,7 +76,7 @@ class CamembertEnsemble:
                 o = m(**tok([text], truncation=True, max_length=256, return_tensors="pt").to(DEVICE)).logits[0].float().cpu().numpy()
                 if o.size == 1: s += w * float(o[0]) * 100
                 else: e = np.exp(o - o.max()); s += w * float((e / e.sum()) @ CENTRES)
-        return int(np.digitize(s, self.seuils)), proba_depuis_score(s), s
+        return int(np.digitize(s, self.seuils)), proba_depuis_seuils(s, self.seuils), s
 
 
 class SvmModel:
